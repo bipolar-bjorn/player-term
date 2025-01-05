@@ -1,0 +1,10 @@
+[package]
+name = "rust-beat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tui = "0.19"
+crossterm = "0.25"
+rodio = "0.17"
+anyhow = "1.0"
