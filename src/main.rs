@@ -5,7 +5,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use rodio::{Decoder, OutputStream, Sink};
-use std::{fs::File, io::BufReader, path::PathBuf, time::Duration};
+use std::{fs::File, io::BufReader, path::PathBuf, sync::Arc, time::Duration};
 use tui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -20,29 +20,42 @@ struct App {
     current_song: Option<usize>,
     playing: bool,
     sink: Option<Sink>,
+    stream: Option<OutputStream>,
+    stream_handle: Option<Arc<rodio::OutputStreamHandle>>,
 }
 
 impl App {
-    fn new() -> Self {
-        Self {
+    fn new() -> Result<Self> {
+        // Initialize audio stream at startup
+        let (stream, stream_handle) = OutputStream::try_default()?;
+        Ok(Self {
             songs: Vec::new(),
             current_song: None,
             playing: false,
             sink: None,
-        }
+            stream: Some(stream),
+            stream_handle: Some(Arc::new(stream_handle)),
+        })
     }
 
     fn play(&mut self) -> Result<()> {
         if let Some(index) = self.current_song {
             if let Some(song_path) = self.songs.get(index) {
-                let (_stream, stream_handle) = OutputStream::try_default()?;
-                let file = BufReader::new(File::open(song_path)?);
-                let source = Decoder::new(file)?;
-                let sink = Sink::try_new(&stream_handle)?;
+                // Stop current playback if any
+                if let Some(sink) = self.sink.take() {
+                    sink.stop();
+                }
 
-                sink.append(source);
-                self.sink = Some(sink);
-                self.playing = true;
+                // Create new sink and start playback
+                if let Some(handle) = &self.stream_handle {
+                    let file = BufReader::new(File::open(song_path)?);
+                    let source = Decoder::new(file)?;
+                    let sink = Sink::try_new(&**handle)?;
+                    sink.append(source);
+                    sink.play();
+                    self.sink = Some(sink);
+                    self.playing = true;
+                }
             }
         }
         Ok(())
@@ -60,14 +73,26 @@ impl App {
     }
 
     fn next_song(&mut self) {
-        if let Some(current) = self.current_song {
-            self.current_song = Some((current + 1) % self.songs.len());
+        if !self.songs.is_empty() {
+            self.current_song = Some(match self.current_song {
+                Some(current) => (current + 1) % self.songs.len(),
+                None => 0,
+            });
         }
     }
 
     fn previous_song(&mut self) {
-        if let Some(current) = self.current_song {
-            self.current_song = Some((current + self.songs.len() - 1) % self.songs.len());
+        if !self.songs.is_empty() {
+            self.current_song = Some(match self.current_song {
+                Some(current) => (current + self.songs.len() - 1) % self.songs.len(),
+                None => 0,
+            });
+        }
+    }
+
+    fn select_first_song(&mut self) {
+        if !self.songs.is_empty() && self.current_song.is_none() {
+            self.current_song = Some(0);
         }
     }
 }
@@ -81,10 +106,12 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run it
-    let mut app = App::new();
+    let mut app = App::new()?;
 
     // Example: Add some songs to the playlist
-    app.songs.push(PathBuf::from("src/our_date.mp3"));
+    app.songs.push(PathBuf::from("src/Mixdown_toska(6).mp3"));
+    app.songs.push(PathBuf::from("src/forlorad for alltid.mp3"));
+    app.select_first_song();
 
     let res = run_app(&mut terminal, &mut app);
 
@@ -117,8 +144,9 @@ fn run_app<B: tui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) 
             let now_playing = if let Some(current) = app.current_song {
                 if let Some(path) = app.songs.get(current) {
                     format!(
-                        "Now Playing: {}",
-                        path.file_name().unwrap().to_string_lossy()
+                        "Now Playing: {} [{}]",
+                        path.file_name().unwrap().to_string_lossy(),
+                        if app.playing { "Playing" } else { "Paused" }
                     )
                 } else {
                     String::from("No song selected")
